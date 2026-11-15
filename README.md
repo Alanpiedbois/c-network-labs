@@ -7,14 +7,15 @@ socket up to a stateful packet filter.
 |---|---|---|
 | [`echo/`](echo/) | TCP echo server, one client at a time (`socket`, `bind`, `listen`, `accept`) | done |
 | [`poll/`](poll/) | Many clients in one thread with `poll()` (event loop, non-blocking by design) | done |
-| `libevent/` | Same server on libevent: buffered I/O, epoll/kqueue backends | next |
-| `ftp/` | FTP server (RFC 959 subset): control and data connections, PASV/PORT | planned |
+| [`libevent/`](libevent/) | Same server on libevent: callbacks, buffered non-blocking I/O, epoll/kqueue backends | done |
+| `ftp/` | FTP server (RFC 959 subset): control and data connections, PASV/PORT | next |
 | `teams/` | Chat server and client with a custom protocol and persistence | planned |
 | `firewall/` | Stateful packet filter: header parsing, rules, connection tracking | planned |
 
 ## Build and run
 
-Requires `gcc` and `make` on Linux.
+Requires `gcc` and `make` on Linux, plus `libevent-dev` for the
+libevent lab (`sudo apt install libevent-dev`).
 
 ```sh
 cd echo
