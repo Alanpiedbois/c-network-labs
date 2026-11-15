@@ -1,0 +1,8 @@
+# Build outputs
+/echo/echo_server
+*.o
+
+# Debugging leftovers
+core
+core.*
+vgcore.*
