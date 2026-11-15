@@ -6,7 +6,8 @@ socket up to a stateful packet filter.
 | Lab | Topic | Status |
 |---|---|---|
 | [`echo/`](echo/) | TCP echo server, one client at a time (`socket`, `bind`, `listen`, `accept`) | done |
-| `poll/` | Many clients in one thread with `poll()`, then with libevent | next |
+| [`poll/`](poll/) | Many clients in one thread with `poll()` (event loop, non-blocking by design) | done |
+| `libevent/` | Same server on libevent: buffered I/O, epoll/kqueue backends | next |
 | `ftp/` | FTP server (RFC 959 subset): control and data connections, PASV/PORT | planned |
 | `teams/` | Chat server and client with a custom protocol and persistence | planned |
 | `firewall/` | Stateful packet filter: header parsing, rules, connection tracking | planned |

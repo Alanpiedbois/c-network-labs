@@ -1,5 +1,6 @@
 # Build outputs
 /echo/echo_server
+/poll/poll_server
 *.o
 
 # Debugging leftovers
