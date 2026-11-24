@@ -2,6 +2,7 @@
 /echo/echo_server
 /poll/poll_server
 /libevent/echo_server
+/proxy/tcp_proxy
 *.o
 
 # Debugging leftovers
