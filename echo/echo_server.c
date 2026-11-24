@@ -1,26 +1,21 @@
 /*
- * echo_server - TCP echo server, one client at a time.
- *
- * Accepts a client, sends back every byte it receives until it
- * disconnects, then waits for the next one.
- *
+ * TCP echo server, one client at a time.
  * Usage: ./echo_server <port>
  */
 
-#include <arpa/inet.h>   /* htons, htonl, ntohs, inet_ntop */
-#include <errno.h>       /* errno, EINTR */
-#include <netinet/in.h>  /* struct sockaddr_in, INADDR_ANY */
-#include <signal.h>      /* signal, SIGPIPE */
-#include <stdio.h>       /* printf, fprintf, perror */
-#include <stdlib.h>      /* strtol, exit */
-#include <string.h>      /* memset */
-#include <sys/socket.h>  /* socket, setsockopt, bind, listen, accept */
-#include <unistd.h>      /* read, write, close */
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
-#define BACKLOG     5     /* pending connections queued by the kernel */
+#define BACKLOG     5
 #define BUFFER_SIZE 1024
 
-/* Parses a TCP port; returns -1 unless str is a number in 1..65535. */
 static int parse_port(const char *str)
 {
     char *end;
@@ -33,11 +28,7 @@ static int parse_port(const char *str)
     return (int)port;
 }
 
-/*
- * Writes all len bytes. write() may send fewer bytes than asked
- * (partial write), so loop until everything is sent.
- * Returns 0 on success, -1 on error.
- */
+/* write() can send less than asked: loop until everything is out. */
 static int write_all(int fd, const char *buf, size_t len)
 {
     while (len > 0) {
@@ -54,7 +45,6 @@ static int write_all(int fd, const char *buf, size_t len)
     return 0;
 }
 
-/* Creates a TCP socket listening on all interfaces; exits on failure. */
 static int create_server(int port)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -63,7 +53,7 @@ static int create_server(int port)
         exit(EXIT_FAILURE);
     }
 
-    /* Allow an immediate restart while the old port is in TIME_WAIT. */
+    /* restart without waiting for TIME_WAIT to expire */
     int opt = 1;
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) {
         perror("setsockopt");
@@ -87,7 +77,6 @@ static int create_server(int port)
     return fd;
 }
 
-/* Echoes everything the client sends until it disconnects or fails. */
 static void handle_client(int client_fd)
 {
     char buffer[BUFFER_SIZE];
@@ -116,17 +105,8 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    /*
-     * Writing to a client that already closed raises SIGPIPE, which
-     * kills the process by default. Ignore it: write() then fails
-     * with EPIPE and only that client is dropped.
-     */
+    /* writing to a closed client must fail with EPIPE, not kill us */
     signal(SIGPIPE, SIG_IGN);
-
-    /*
-     * stdout is fully buffered when redirected to a file or a pipe:
-     * logs would only appear once the buffer fills. Flush every line.
-     */
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     int server_fd = create_server(port);

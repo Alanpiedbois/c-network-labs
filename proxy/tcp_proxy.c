@@ -1,69 +1,56 @@
 /*
- * tcp_proxy - a tiny application-level firewall built on libevent.
- *
- * Accepts TCP clients on a local port and checks each client IP
- * against an ordered rule list (first match wins, default deny).
- * Allowed clients are relayed to a fixed backend in both directions:
- *
- *     client <--> [ tcp_proxy: rules + logs ] <--> backend
- *
- * Every connection is logged: ALLOW / DENY, then CLOSE with the
- * number of bytes sent each way.
+ * TCP proxy that filters clients by IP before relaying them to a backend.
+ * Rules: "allow|deny <ip>[/prefix]" or "allow|deny any", first match wins,
+ * no match = deny.
  *
  * Usage: ./tcp_proxy <listen_port> <backend_ip> <backend_port> <rules_file>
  */
 
-#include <arpa/inet.h>           /* inet_ntop, inet_pton, ntohl, htons */
-#include <errno.h>               /* errno */
-#include <netinet/in.h>          /* struct sockaddr_in */
-#include <signal.h>              /* signal, SIGPIPE */
-#include <stdint.h>              /* uint32_t */
-#include <stdio.h>               /* printf, fprintf, fopen, fgets */
-#include <stdlib.h>              /* strtol, calloc, free */
-#include <string.h>              /* strcmp, strchr, strcspn */
-#include <sys/socket.h>          /* shutdown */
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
 
-#include <event2/buffer.h>       /* evbuffer_* */
-#include <event2/bufferevent.h>  /* bufferevent_* */
-#include <event2/event.h>        /* event_base_* */
-#include <event2/listener.h>     /* evconnlistener_* */
+#include <event2/buffer.h>
+#include <event2/bufferevent.h>
+#include <event2/event.h>
+#include <event2/listener.h>
 
 #define BACKLOG     16
 #define MAX_RULES   64
-#define MAX_PENDING (256 * 1024) /* bytes queued toward one side before we pause the other */
+#define MAX_PENDING (256 * 1024)   /* per direction, then we stop reading the sender */
 
-/* One line of the rules file, e.g. "allow 192.168.1.0/24". */
 struct rule {
-    int      allow;   /* 1 = allow, 0 = deny */
-    uint32_t net;     /* network address, host byte order */
-    uint32_t mask;    /* netmask, host byte order (/24 = 0xFFFFFF00) */
+    int      allow;
+    uint32_t net;    /* host byte order */
+    uint32_t mask;
 };
 
-/* Global proxy settings, passed to accept_cb as ctx. */
 struct proxy {
     struct rule        rules[MAX_RULES];
     int                nrules;
     struct sockaddr_in backend_addr;
 };
 
-/* One relayed connection: two sockets glued together. */
 struct conn {
     struct bufferevent *client;
     struct bufferevent *backend;
-    char                peer[32];  /* "ip:port" of the client, for logs */
-    size_t              up;        /* bytes client -> backend */
-    size_t              down;      /* bytes backend -> client */
-    int                 client_eof;   /* client sent FIN: nothing more to read from it */
-    int                 backend_eof;
-    int                 client_fin;   /* we sent FIN to the client */
-    int                 backend_fin;
+    char                peer[32];
+    size_t              up;      /* client -> backend */
+    size_t              down;    /* backend -> client */
+    int                 client_eof, backend_eof;   /* that side sent FIN */
+    int                 client_fin, backend_fin;   /* we sent FIN to that side */
 };
 
 static void read_cb(struct bufferevent *bev, void *ctx);
 static void write_cb(struct bufferevent *bev, void *ctx);
 static void event_cb(struct bufferevent *bev, short events, void *ctx);
 
-/* Parses a TCP port; returns -1 unless str is a number in 1..65535. */
 static int parse_port(const char *str)
 {
     char *end;
@@ -76,7 +63,6 @@ static int parse_port(const char *str)
     return (int)port;
 }
 
-/* Parses "allow|deny <ip>[/<prefix>]" or "allow|deny any". Returns 0 or -1. */
 static int parse_rule(const char *line, struct rule *r)
 {
     char action[8];
@@ -95,7 +81,7 @@ static int parse_rule(const char *line, struct rule *r)
 
     if (strcmp(target, "any") == 0) {
         r->net = 0;
-        r->mask = 0;   /* mask 0: every IP matches */
+        r->mask = 0;
         return 0;
     }
 
@@ -106,20 +92,19 @@ static int parse_rule(const char *line, struct rule *r)
         if (end == slash + 1 || *end != '\0' || p < 0 || p > 32)
             return -1;
         prefix = (int)p;
-        *slash = '\0';   /* cut "10.0.0.0/8" into "10.0.0.0" */
+        *slash = '\0';
     }
 
     struct in_addr addr;
     if (inet_pton(AF_INET, target, &addr) != 1)
         return -1;
 
-    /* Shifting a 32-bit value by 32 is undefined in C, so /0 is special. */
+    /* << 32 on a 32-bit value is UB (x86 treats it as << 0) */
     r->mask = prefix == 0 ? 0 : 0xFFFFFFFFu << (32 - prefix);
     r->net = ntohl(addr.s_addr) & r->mask;
     return 0;
 }
 
-/* Loads the rules file; '#' starts a comment, blank lines are skipped. */
 static int load_rules(const char *path, struct proxy *p)
 {
     FILE *f = fopen(path, "r");
@@ -136,7 +121,7 @@ static int load_rules(const char *path, struct proxy *p)
         lineno++;
         line[strcspn(line, "#\n")] = '\0';
         if (sscanf(line, " %c", &probe) != 1)
-            continue;   /* blank or comment-only line */
+            continue;
         if (p->nrules == MAX_RULES) {
             fprintf(stderr, "%s:%d: too many rules (max %d)\n", path, lineno, MAX_RULES);
             fclose(f);
@@ -153,7 +138,6 @@ static int load_rules(const char *path, struct proxy *p)
     return 0;
 }
 
-/* First matching rule decides; no match means deny. ip is in host byte order. */
 static int is_allowed(const struct proxy *p, uint32_t ip)
 {
     for (int i = 0; i < p->nrules; i++) {
@@ -163,7 +147,6 @@ static int is_allowed(const struct proxy *p, uint32_t ip)
     return 0;
 }
 
-/* The other end of the pipe. */
 static struct bufferevent *partner(struct conn *c, struct bufferevent *bev)
 {
     return bev == c->client ? c->backend : c->client;
@@ -182,15 +165,14 @@ static int *fin_flag(struct conn *c, struct bufferevent *bev)
 static void conn_free(struct conn *c)
 {
     printf("CLOSE %s (up %zu B, down %zu B)\n", c->peer, c->up, c->down);
-    bufferevent_free(c->client);    /* closes the sockets (BEV_OPT_CLOSE_ON_FREE) */
+    bufferevent_free(c->client);
     bufferevent_free(c->backend);
     free(c);
 }
 
 /*
- * Moves everything src received into its partner's output buffer.
- * If the partner cannot keep up (slow reader), stop reading src until
- * the partner's backlog drops: memory stays bounded at ~MAX_PENDING.
+ * Backpressure: when dst lags behind by MAX_PENDING bytes, stop reading
+ * src until dst drains to half. TCP then slows the sender down for us.
  */
 static void relay(struct conn *c, struct bufferevent *src)
 {
@@ -207,7 +189,6 @@ static void relay(struct conn *c, struct bufferevent *src)
 
     if (!*eof_flag(c, src) && evbuffer_get_length(out) >= MAX_PENDING) {
         bufferevent_disable(src, EV_READ);
-        /* write_cb fires once dst's output falls to MAX_PENDING / 2 */
         bufferevent_setwatermark(dst, EV_WRITE, MAX_PENDING / 2, 0);
         bufferevent_setcb(dst, read_cb, write_cb, event_cb, c);
     }
@@ -219,17 +200,15 @@ static void read_cb(struct bufferevent *bev, void *ctx)
 }
 
 /*
- * The source side of dst sent FIN. Once dst's output buffer is empty,
- * pass the FIN on with shutdown(SHUT_WR): "no more data, but I still
- * listen". The other direction keeps flowing (TCP half-close).
- * When both directions are finished, the connection is closed.
+ * Half-close: forward the FIN with shutdown(SHUT_WR) once dst has sent
+ * everything, so the other direction keeps working. close() would cut
+ * the reply. Free the pair when both directions are done.
  */
 static void finish_direction(struct conn *c, struct bufferevent *dst)
 {
     if (*fin_flag(c, dst))
         return;
     if (evbuffer_get_length(bufferevent_get_output(dst)) > 0) {
-        /* still sending: write_cb calls us again once the buffer is empty */
         bufferevent_setwatermark(dst, EV_WRITE, 0, 0);
         bufferevent_setcb(dst, read_cb, write_cb, event_cb, c);
         return;
@@ -241,11 +220,7 @@ static void finish_direction(struct conn *c, struct bufferevent *dst)
         conn_free(c);
 }
 
-/*
- * bev's output buffer drained down to its low watermark.
- * Source finished: the buffer is now empty, pass the FIN on.
- * Otherwise: the backlog went down, resume reading the source.
- */
+/* Output drained to the low watermark: finish the FIN, or resume the sender. */
 static void write_cb(struct bufferevent *bev, void *ctx)
 {
     struct conn *c = ctx;
@@ -260,7 +235,6 @@ static void write_cb(struct bufferevent *bev, void *ctx)
     bufferevent_enable(src, EV_READ);
 }
 
-/* Backend connected, or one side sent FIN, or a socket failed. */
 static void event_cb(struct bufferevent *bev, short events, void *ctx)
 {
     struct conn *c = ctx;
@@ -270,7 +244,6 @@ static void event_cb(struct bufferevent *bev, short events, void *ctx)
         return;
     }
     if (events & BEV_EVENT_ERROR) {
-        /* refused, reset (RST)...: the pipe is broken, drop everything */
         int err = EVUTIL_SOCKET_ERROR();
         fprintf(stderr, "ERROR %s (%s side): %s\n", c->peer,
                 bev == c->client ? "client" : "backend",
@@ -279,7 +252,6 @@ static void event_cb(struct bufferevent *bev, short events, void *ctx)
         return;
     }
     if (events & BEV_EVENT_EOF) {
-        /* bev sent FIN: forward its last bytes, then the FIN itself */
         *eof_flag(c, bev) = 1;
         relay(c, bev);
         bufferevent_disable(bev, EV_READ);
@@ -287,7 +259,6 @@ static void event_cb(struct bufferevent *bev, short events, void *ctx)
     }
 }
 
-/* A client connected: apply the rules, then open the backend side. */
 static void accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
                       struct sockaddr *addr, int socklen, void *ctx)
 {
@@ -331,8 +302,7 @@ static void accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
     bufferevent_setcb(c->client, read_cb, NULL, event_cb, c);
     bufferevent_setcb(c->backend, read_cb, NULL, event_cb, c);
 
-    /* Non-blocking connect: BEV_EVENT_CONNECTED or BEV_EVENT_ERROR comes later.
-     * Data the client sends meanwhile waits in the backend's output buffer. */
+    /* non-blocking: client data waits in the backend output until connected */
     if (bufferevent_socket_connect(c->backend, (struct sockaddr *)&p->backend_addr,
                                    sizeof(p->backend_addr)) < 0) {
         fprintf(stderr, "ERROR %s: cannot start backend connection\n", c->peer);
@@ -345,7 +315,7 @@ static void accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
 
 int main(int argc, char **argv)
 {
-    static struct proxy p;   /* static: zeroed, and kept off the stack */
+    static struct proxy p;
 
     if (argc != 5) {
         fprintf(stderr, "usage: %s <listen_port> <backend_ip> <backend_port> <rules_file>\n",

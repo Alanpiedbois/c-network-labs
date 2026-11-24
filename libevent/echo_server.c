@@ -1,34 +1,24 @@
 /*
- * echo_server (libevent) - TCP echo server for many clients.
- *
- * Same behaviour as poll_server, but libevent runs the event loop
- * (epoll on Linux, kqueue on FreeBSD) and calls our callbacks:
- *   accept_cb  a client connected
- *   read_cb    a client sent data
- *   event_cb   a client disconnected or failed
- * Each client is a bufferevent: a socket with an input and an output
- * buffer. Writes go to the output buffer and are sent without blocking.
- *
+ * Same echo server as poll/, on libevent (epoll / kqueue).
  * Usage: ./echo_server <port>
  */
 
-#include <arpa/inet.h>           /* inet_ntop, ntohs, htons, htonl */
-#include <errno.h>               /* errno */
-#include <netinet/in.h>          /* struct sockaddr_in */
-#include <signal.h>              /* signal, SIGPIPE */
-#include <stdio.h>               /* printf, fprintf, perror */
-#include <stdlib.h>              /* strtol */
-#include <string.h>              /* memset */
-#include <unistd.h>              /* close */
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
-#include <event2/buffer.h>       /* evbuffer_* */
-#include <event2/bufferevent.h>  /* bufferevent_* */
-#include <event2/event.h>        /* event_base_* */
-#include <event2/listener.h>     /* evconnlistener_* */
+#include <event2/buffer.h>
+#include <event2/bufferevent.h>
+#include <event2/event.h>
+#include <event2/listener.h>
 
-#define BACKLOG 5   /* pending connections queued by the kernel */
+#define BACKLOG 5
 
-/* Parses a TCP port; returns -1 unless str is a number in 1..65535. */
 static int parse_port(const char *str)
 {
     char *end;
@@ -41,7 +31,6 @@ static int parse_port(const char *str)
     return (int)port;
 }
 
-/* Called when a client disconnects or its socket fails. */
 static void event_cb(struct bufferevent *bev, short events, void *ctx)
 {
     (void)ctx;
@@ -56,10 +45,9 @@ static void event_cb(struct bufferevent *bev, short events, void *ctx)
                 (int)fd, evutil_socket_error_to_string(err));
     }
     printf("client disconnected (fd %d)\n", (int)fd);
-    bufferevent_free(bev);   /* also closes the socket (BEV_OPT_CLOSE_ON_FREE) */
+    bufferevent_free(bev);
 }
 
-/* Called when a client sent data: move it all to the output buffer. */
 static void read_cb(struct bufferevent *bev, void *ctx)
 {
     (void)ctx;
@@ -69,14 +57,12 @@ static void read_cb(struct bufferevent *bev, void *ctx)
     evbuffer_add_buffer(output, input);
 }
 
-/* Called for each new client; libevent has already done accept(). */
 static void accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
                       struct sockaddr *addr, int socklen, void *ctx)
 {
     (void)socklen;
     (void)ctx;
 
-    /* The server listens on AF_INET, so addr is an IPv4 address. */
     struct sockaddr_in *sin = (struct sockaddr_in *)addr;
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
@@ -106,9 +92,7 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    /* libevent does not ignore SIGPIPE for us. */
-    signal(SIGPIPE, SIG_IGN);
-    /* Flush logs line by line, even when redirected to a file. */
+    signal(SIGPIPE, SIG_IGN);   /* libevent does not do it for us */
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     struct event_base *base = event_base_new();
@@ -123,7 +107,6 @@ int main(int argc, char **argv)
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port);
 
-    /* socket + SO_REUSEADDR + bind + listen; accept_cb runs per client. */
     struct evconnlistener *listener = evconnlistener_new_bind(
         base, accept_cb, NULL,
         LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE, BACKLOG,
@@ -135,7 +118,7 @@ int main(int argc, char **argv)
     }
 
     printf("listening on port %d (backend: %s)\n", port, event_base_get_method(base));
-    event_base_dispatch(base);   /* runs until no events remain */
+    event_base_dispatch(base);
 
     evconnlistener_free(listener);
     event_base_free(base);
